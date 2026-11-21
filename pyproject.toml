@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opsec-sanitizer"
+version = "0.1.0"
+description = "Offline OPSEC document sanitizer and metadata flattener for investigative journalism"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.12.0",
+    "Pillow>=10.0.0",
+    "pymupdf>=1.24.0",
+    "python-docx>=1.1.0",
+    "pytesseract>=0.3.10",
+    "rapidocr-onnxruntime>=1.2.0",
+]
+
+[project.optional-dependencies]
+spacy = ["spacy>=3.7.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "types-Pillow>=10.0.0",
+]
+
+[project.scripts]
+opsec-sanitize = "opsec_sanitizer.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: slow integration or OCR/NER tests",
+    "e2e: end-to-end CLI tests",
+]
+
+[tool.coverage.run]
+source = ["src/opsec_sanitizer"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "B", "UP", "S", "C4", "SIM"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = [
+    "fitz",
+    "fitz.*",
+    "pymupdf",
+    "pymupdf.*",
+    "pytesseract",
+    "rapidocr_onnxruntime",
+    "rapidocr_onnxruntime.*",
+    "docx",
+    "docx.*",
+    "spacy",
+    "spacy.*",
+]
+ignore_missing_imports = true
