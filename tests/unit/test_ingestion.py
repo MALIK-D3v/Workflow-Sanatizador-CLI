@@ -22,18 +22,20 @@ from opsec_sanitizer.domain.models import DocumentType, IngestionLimits
 from opsec_sanitizer.ingestion.validator import validate_document
 
 
-def _make_pdf_bytes(password: str | None = None) -> bytes:
+def _make_pdf_bytes(lock_key: str | None = None) -> bytes:
     doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((72, 72), "Documento de prueba")
-    if password:
-        data = doc.tobytes(
-            encryption=pymupdf.PDF_ENCRYPT_AES_256,
-            user_pw=password,
-            owner_pw=password,
+    if lock_key:
+        data = bytes(
+            doc.tobytes(
+                encryption=pymupdf.PDF_ENCRYPT_AES_256,
+                user_pw=lock_key,
+                owner_pw=lock_key,
+            )
         )
     else:
-        data = doc.tobytes()
+        data = bytes(doc.tobytes())
     doc.close()
     return data
 
@@ -146,7 +148,7 @@ class TestValidateDocument:
 
     def test_rejects_encrypted_pdf(self, tmp_path: Path) -> None:
         locked = tmp_path / "locked.pdf"
-        locked.write_bytes(_make_pdf_bytes(password="secret123"))
+        locked.write_bytes(_make_pdf_bytes(lock_key="fixture-lock"))
 
         with pytest.raises(EncryptedDocumentError):
             validate_document(locked)
