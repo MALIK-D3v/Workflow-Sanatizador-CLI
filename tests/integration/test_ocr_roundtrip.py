@@ -9,6 +9,7 @@ import pytest
 
 from opsec_sanitizer.detection.merger import HybridPiiDetector
 from opsec_sanitizer.detection.regex_mx import compute_curp_check_digit
+from opsec_sanitizer.domain.models import PiiCategory
 from opsec_sanitizer.processing.ocr_engine import RapidOcrEngine
 from opsec_sanitizer.processing.pdf_flattener import FlattenOptions, flatten_pdf
 from opsec_sanitizer.verification.forensic_gate import verify_pdf_forensically
@@ -44,7 +45,8 @@ class TestOcrRoundtrip:
             options=FlattenOptions(dpi=200, padding_px=6, enable_ocr=True),
         )
 
-        assert result.pii_counts.get(next(iter(result.pii_counts)), 0) >= 1
+        assert result.pii_counts.get(PiiCategory.CURP, 0) == 1
+        assert result.pii_counts.get(PiiCategory.EMAIL, 0) == 1
         report = verify_pdf_forensically(dst, detector=detector)
         assert report.passed is True
 

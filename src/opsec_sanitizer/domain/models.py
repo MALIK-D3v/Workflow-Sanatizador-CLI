@@ -34,6 +34,9 @@ class IngestionLimits:
     max_uncompressed_docx_bytes: int = 200 * 1024 * 1024  # 200 MiB
     max_compression_ratio: float = 100.0
     max_archive_entries: int = 2_000
+    max_pages: int = 500
+    max_page_pixels: int = 40_000_000
+    max_image_pixels: int = 40_000_000
     allow_symlinks: bool = False
 
 
@@ -84,3 +87,4 @@ class OcrWord:
     text: str
     bbox: BBox
     confidence: float = 1.0
+    line_bbox: BBox | None = None

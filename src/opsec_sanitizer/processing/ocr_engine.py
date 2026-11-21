@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from typing import Any
 
 import numpy as np
@@ -10,6 +12,7 @@ from PIL import Image
 
 from opsec_sanitizer.domain.models import BBox, OcrWord
 from opsec_sanitizer.domain.ports import OcrEngine
+from opsec_sanitizer.io_utils import ram_tmp_root
 
 
 def _split_line_to_words(text: str, box: BBox, confidence: float) -> list[OcrWord]:
@@ -18,7 +21,7 @@ def _split_line_to_words(text: str, box: BBox, confidence: float) -> list[OcrWor
         return []
     tokens = stripped.split()
     if len(tokens) == 1:
-        return [OcrWord(text=tokens[0], bbox=box, confidence=confidence)]
+        return [OcrWord(text=tokens[0], bbox=box, confidence=confidence, line_bbox=box)]
 
     total_chars = max(len(stripped), 1)
     width = box.x1 - box.x0
@@ -35,6 +38,7 @@ def _split_line_to_words(text: str, box: BBox, confidence: float) -> list[OcrWor
                 text=token,
                 bbox=BBox(x0=wx0, y0=box.y0, x1=wx1, y1=box.y1),
                 confidence=confidence,
+                line_bbox=box,
             )
         )
         cursor = idx + len(token)
@@ -67,7 +71,7 @@ class RapidOcrEngine:
 
 
 class TesseractOcrEngine:
-    """Offline OCR adapter backed by local Tesseract CLI (requires tesseract binary)."""
+    """Offline OCR adapter backed by local Tesseract CLI using RAM tmpdir when available."""
 
     def __init__(self, lang: str = "spa+eng") -> None:
         if shutil.which("tesseract") is None:
@@ -77,29 +81,34 @@ class TesseractOcrEngine:
     def extract_words(self, image: Image.Image) -> tuple[OcrWord, ...]:
         import pytesseract
 
-        data: dict[str, list[Any]] = pytesseract.image_to_data(
-            image.convert("RGB"),
-            lang=self._lang,
-            output_type=pytesseract.Output.DICT,
-        )
+        prev_tmpdir = os.environ.get("TMPDIR")
+        with tempfile.TemporaryDirectory(prefix="opsec_ocr_", dir=ram_tmp_root()) as tmp_dir:
+            os.environ["TMPDIR"] = tmp_dir
+            try:
+                data: dict[str, list[Any]] = pytesseract.image_to_data(
+                    image.convert("RGB"),
+                    lang=self._lang,
+                    output_type=pytesseract.Output.DICT,
+                )
+            finally:
+                if prev_tmpdir is None:
+                    os.environ.pop("TMPDIR", None)
+                else:
+                    os.environ["TMPDIR"] = prev_tmpdir
+
         words: list[OcrWord] = []
         count = len(data.get("text", []))
         for i in range(count):
             text = str(data["text"][i]).strip()
-            if not text:
+            if not text or float(data["conf"][i]) < 0:
                 continue
-            conf_raw = float(data["conf"][i])
-            if conf_raw < 0:
-                continue
-            x = float(data["left"][i])
-            y = float(data["top"][i])
-            w = float(data["width"][i])
-            h = float(data["height"][i])
+            x, y = float(data["left"][i]), float(data["top"][i])
+            w, h = float(data["width"][i]), float(data["height"][i])
             words.append(
                 OcrWord(
                     text=text,
                     bbox=BBox(x0=x, y0=y, x1=x + w, y1=y + h),
-                    confidence=conf_raw / 100.0,
+                    confidence=float(data["conf"][i]) / 100.0,
                 )
             )
         return tuple(words)

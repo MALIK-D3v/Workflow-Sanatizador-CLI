@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from PIL import ExifTags, Image, ImageDraw, ImageFilter, ImageOps
+from PIL import ExifTags, Image, ImageDraw, ImageFilter, ImageOps, UnidentifiedImageError
 
+from opsec_sanitizer.domain.errors import InvalidDocumentError
 from opsec_sanitizer.domain.models import BBox
 
 
@@ -22,21 +23,36 @@ def _collect_metadata_keys(img: Image.Image) -> tuple[str, ...]:
     return tuple(sorted(set(keys)))
 
 
+def _flatten_to_white_rgb(img: Image.Image) -> Image.Image:
+    """Composite any alpha/transparency channel onto pure white so hidden alpha=0 RGB is erased."""
+    has_alpha = img.mode in ("RGBA", "LA", "PA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+    if not has_alpha:
+        return img.convert("RGB")
+    rgba = img.convert("RGBA")
+    canvas = Image.new("RGB", rgba.size, color=(255, 255, 255))
+    canvas.paste(rgba, mask=rgba.getchannel("A"))
+    return canvas
+
+
 def strip_image_to_clean_rgb(
     source_path: Path,
     *,
     paranoid_denoise: bool = False,
 ) -> tuple[Image.Image, tuple[str, ...]]:
     """Decode an image into a brand-new RGB pixel buffer stripped of all metadata."""
-    with Image.open(source_path) as opened:
-        removed_keys = _collect_metadata_keys(opened)
-        transposed = ImageOps.exif_transpose(opened)
-        rgb = transposed.convert("RGB")
-        if paranoid_denoise:
-            gray = rgb.convert("L").filter(ImageFilter.MedianFilter(size=3))
-            rgb = gray.convert("RGB")
-        # Rebuild purely from raw pixel bytes so no info/EXIF/ICC survives
-        clean = Image.frombytes("RGB", rgb.size, rgb.tobytes())
+    try:
+        with Image.open(source_path) as opened:
+            removed_keys = _collect_metadata_keys(opened)
+            transposed = ImageOps.exif_transpose(opened)
+            rgb = _flatten_to_white_rgb(transposed)
+            if paranoid_denoise:
+                gray = rgb.convert("L").filter(ImageFilter.MedianFilter(size=3))
+                rgb = gray.convert("RGB")
+            clean = Image.frombytes("RGB", rgb.size, rgb.tobytes())
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as exc:
+        raise InvalidDocumentError("Image file is corrupt or exceeds safe limits") from exc
     return clean, removed_keys
 
 

@@ -22,7 +22,9 @@ def _find_deny_list_spans(text: str, deny_list: frozenset[str]) -> list[PiiSpan]
         term = raw_term.strip()
         if not term:
             continue
-        pattern = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE)
+        left = r"(?<!\w)" if term[0].isalnum() or term[0] == "_" else ""
+        right = r"(?!\w)" if term[-1].isalnum() or term[-1] == "_" else ""
+        pattern = re.compile(rf"{left}{re.escape(term)}{right}", re.IGNORECASE)
         for match in pattern.finditer(text):
             spans.append(
                 PiiSpan(
@@ -36,25 +38,38 @@ def _find_deny_list_spans(text: str, deny_list: frozenset[str]) -> list[PiiSpan]
     return spans
 
 
+def _pick_higher_priority(a: PiiSpan, b: PiiSpan) -> PiiSpan:
+    pa = _SOURCE_PRIORITY.get(a.source, 0)
+    pb = _SOURCE_PRIORITY.get(b.source, 0)
+    if pa != pb:
+        return a if pa > pb else b
+    return a if a.confidence >= b.confidence else b
+
+
 def _resolve_overlaps(candidates: Sequence[PiiSpan]) -> tuple[PiiSpan, ...]:
-    ordered = sorted(
-        candidates,
-        key=lambda sp: (
-            -_SOURCE_PRIORITY.get(sp.source, 0),
-            -(sp.end - sp.start),
-            -sp.confidence,
-            sp.start,
-        ),
+    """Monotonically merge overlapping spans into their union, keeping highest priority label."""
+    valid = sorted(
+        (sp for sp in candidates if sp.end > sp.start),
+        key=lambda sp: (sp.start, -sp.end),
     )
-    accepted: list[PiiSpan] = []
-    for span in ordered:
-        if span.end <= span.start:
-            continue
-        overlaps = any(not (span.end <= a.start or span.start >= a.end) for a in accepted)
-        if not overlaps:
-            accepted.append(span)
-    accepted.sort(key=lambda sp: (sp.start, sp.end))
-    return tuple(accepted)
+    if not valid:
+        return ()
+
+    merged: list[PiiSpan] = [valid[0]]
+    for current in valid[1:]:
+        prev = merged[-1]
+        if current.start < prev.end:
+            winner = _pick_higher_priority(prev, current)
+            merged[-1] = PiiSpan(
+                start=min(prev.start, current.start),
+                end=max(prev.end, current.end),
+                category=winner.category,
+                confidence=max(prev.confidence, current.confidence),
+                source=winner.source,
+            )
+        else:
+            merged.append(current)
+    return tuple(merged)
 
 
 class HybridPiiDetector:

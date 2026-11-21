@@ -11,6 +11,7 @@ from PIL import Image, PngImagePlugin
 from opsec_sanitizer.detection.merger import HybridPiiDetector
 from opsec_sanitizer.detection.regex_mx import compute_curp_check_digit
 from opsec_sanitizer.domain.errors import ForensicLeakError
+from opsec_sanitizer.processing.pdf_flattener import _save_clean_pdf
 from opsec_sanitizer.verification.forensic_gate import (
     verify_image_forensically,
     verify_pdf_forensically,
@@ -25,20 +26,7 @@ def _make_clean_pdf(path: Path, text: str = "") -> None:
     page = doc.new_page()
     if text:
         page.insert_text((72, 72), text)
-    doc.del_xml_metadata()
-    doc.set_metadata(
-        {
-            "title": "",
-            "author": "",
-            "subject": "",
-            "keywords": "",
-            "creator": "",
-            "producer": "",
-            "creationDate": "D:19700101000000Z",
-            "modDate": "D:19700101000000Z",
-        }
-    )
-    doc.save(str(path), garbage=4, deflate=True, clean=True)
+    _save_clean_pdf(doc, path)
     doc.close()
 
 

@@ -17,17 +17,25 @@ _CURP_STATES = frozenset(
 )
 
 _CURP_PATTERN = re.compile(
-    r"\b([A-Z][AEIOUX][A-Z]{2}\d{6}[HMX][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[0-9A-Z]\d)\b"
+    r"\b([A-Z][AEIOUX][A-Z]{2}\d{6}[HMX][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[0-9A-Z]\d)\b",
+    re.IGNORECASE,
 )
 _RFC_PATTERN = re.compile(
-    r"(?<![A-Z0-9Ñ&])([A-ZÑ&]{3,4}\d{6}[A-Z0-9]{2}[0-9A])(?![A-Z0-9Ñ&])"
+    r"(?<![A-Z0-9Ñ&])([A-ZÑ&]{3,4}-?\d{6}-?[A-Z0-9]{2}[0-9A])(?![A-Z0-9Ñ&])",
+    re.IGNORECASE,
 )
 _EMAIL_PATTERN = re.compile(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 )
 _PHONE_PATTERN = re.compile(
-    r"(?<!\d)(?:\+52[\s.-]?(?:1[\s.-]?)?)?"
-    r"(?:\(\d{2,3}\)[\s.-]?\d{3,4}[\s.-]?\d{4}|\d{2,3}[\s.-]\d{3,4}[\s.-]\d{4})(?!\d)"
+    r"(?<!\d)(?:"
+    r"\+52[\s.-]?(?:1[\s.-]?)?\d{10}"
+    r"|(?:\+52[\s.-]?(?:1[\s.-]?)?)?"
+    r"(?:\(\d{2,3}\)[\s.-]?\d{3,4}[\s.-]?\d{4}"
+    r"|\d{2,3}[\s.-]\d{3,4}[\s.-]\d{4}"
+    r"|\d{2}[\s.-]\d{2}[\s.-]\d{2}[\s.-]\d{2}[\s.-]\d{2}"
+    r"|\d{2,3}-\d{7,8})"
+    r")(?!\d)"
 )
 
 
@@ -53,8 +61,7 @@ def compute_curp_check_digit(curp_prefix_17: str) -> str:
         if pos < 0:
             raise ValueError(f"Unsupported character in CURP prefix: {ch!r}")
         total += pos * (18 - idx)
-    digit = (10 - (total % 10)) % 10
-    return str(digit)
+    return str((10 - (total % 10)) % 10)
 
 
 def is_valid_curp(candidate: str) -> bool:
@@ -70,12 +77,12 @@ def is_valid_curp(candidate: str) -> bool:
 
 
 def is_valid_rfc(candidate: str) -> bool:
-    """Return True if candidate matches Mexican RFC (12 or 13 chars) with valid date."""
-    upper = candidate.upper()
-    if len(upper) not in (12, 13) or not _RFC_PATTERN.fullmatch(upper):
+    """Return True if candidate matches Mexican RFC (12 or 13 chars, optional hyphens)."""
+    compact = candidate.replace("-", "").upper()
+    if len(compact) not in (12, 13) or not _RFC_PATTERN.fullmatch(compact):
         return False
-    date_offset = 3 if len(upper) == 12 else 4
-    return _is_valid_yymmdd(upper[date_offset : date_offset + 6])
+    date_offset = 3 if len(compact) == 12 else 4
+    return _is_valid_yymmdd(compact[date_offset : date_offset + 6])
 
 
 def detect_regex_pii(text: str) -> tuple[PiiSpan, ...]:
