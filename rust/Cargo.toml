@@ -1,0 +1,21 @@
+[package]
+name = "opsec-orchestrator"
+version = "0.1.0"
+edition = "2021"
+description = "Rust air-gapped OPSEC orchestrator, Bubblewrap sandbox runner, and independent binary forensic verifier"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+regex = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.14"
+thiserror = "2.0"
+zeroize = { version = "1.8", features = ["derive"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
