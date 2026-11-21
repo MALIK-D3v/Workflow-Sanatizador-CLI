@@ -4,3 +4,5 @@
 pub mod error;
 pub mod forensic;
 pub mod ingestion;
+pub mod ipc;
+pub mod sandbox;

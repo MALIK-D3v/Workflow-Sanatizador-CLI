@@ -55,20 +55,16 @@ fn bubblewrap_sandbox_blocks_network_and_host_writes_outside_staging() {
     // 1. Inside bwrap, writing to staging succeeds, writing outside fails with Read-Only FS,
     //    and outbound TCP connection fails with ENETUNREACH!
     let probe = format!(
-        "import os, socket, sys; \
-         open({staging:?} + '/ok.txt', 'w').write('ok'); \
-         ro_blocked = False\n\
-         try:\n\
-             open({outside:?} + '/escape.txt', 'w').write('bad')\n\
-         except OSError:\n\
-             ro_blocked = True\n\
-         net_blocked = False\n\
-         try:\n\
-             s = socket.socket(); s.settimeout(1.0); s.connect(('1.1.1.1', 80))\n\
-         except OSError:\n\
-             net_blocked = True\n\
-         print(f'ro={{ro_blocked}} net={{net_blocked}}')\n\
-         sys.exit(0 if (ro_blocked and net_blocked) else 9)",
+        "import os, socket, sys\n\
+open({staging:?} + '/ok.txt', 'w').write('ok')\n\
+ro_blocked = False\n\
+try:\n    open({outside:?} + '/escape.txt', 'w').write('bad')\n\
+except OSError:\n    ro_blocked = True\n\
+net_blocked = False\n\
+try:\n    s = socket.socket(); s.settimeout(1.0); s.connect(('1.1.1.1', 80))\n\
+except OSError:\n    net_blocked = True\n\
+print(f'ro={{ro_blocked}} net={{net_blocked}}')\n\
+sys.exit(0 if (ro_blocked and net_blocked) else 9)\n",
         staging = staging_path.to_string_lossy(),
         outside = outside_path.to_string_lossy(),
     );
