@@ -72,6 +72,8 @@ module = [
     "rapidocr_onnxruntime.*",
     "docx",
     "docx.*",
+    "lxml",
+    "lxml.*",
     "spacy",
     "spacy.*",
 ]
