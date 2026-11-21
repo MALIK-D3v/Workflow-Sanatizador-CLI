@@ -22,7 +22,12 @@ def sha256_file(path: Path) -> str:
 
 
 def ram_tmp_root() -> str | None:
-    """Return RAM-backed /dev/shm if writable; otherwise None (system temp fallback)."""
+    """Return writable RAM tmpdir (preferring sandboxed TMPDIR under /dev/shm if set)."""
+    env_tmp = os.environ.get("TMPDIR")
+    if env_tmp:
+        env_path = Path(env_tmp)
+        if env_path.is_dir() and os.access(env_path, os.W_OK):
+            return str(env_path)
     shm = Path("/dev/shm")  # noqa: S108
     if shm.is_dir() and os.access(shm, os.W_OK):
         return str(shm)

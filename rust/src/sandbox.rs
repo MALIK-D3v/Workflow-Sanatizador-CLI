@@ -123,9 +123,17 @@ fn build_sandboxed_command(
                 "/dev",
                 "--proc",
                 "/proc",
+                "--tmpfs",
+                "/tmp",
                 "--bind",
                 &wdir,
                 &wdir,
+            ]);
+            if let Ok(prog_canon) = std::fs::canonicalize(program) {
+                let prog_str = prog_canon.to_string_lossy().into_owned();
+                cmd.args(["--ro-bind", &prog_str, &prog_str]);
+            }
+            cmd.args([
                 "--unshare-net",
                 "--unshare-pid",
                 "--die-with-parent",

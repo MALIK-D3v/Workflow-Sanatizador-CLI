@@ -59,7 +59,8 @@ with open({jpg:?}, "ab") as fh:
 # 3. Trapped DOCX with external canary relationship
 w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 with zipfile.ZipFile({docx:?}, "w") as zf:
-    zf.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>')
+    zf.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    zf.writestr("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
     zf.writestr("word/_rels/document.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://canary.invalid/pixel.png" TargetMode="External"/></Relationships>')
     zf.writestr("word/document.xml", f'<w:document xmlns:w="{{w_ns}}"><w:body><w:p><w:r><w:t>Oficio limpio RFC ABC9912319Z0</w:t></w:r><w:del><w:r><w:delText>BORRADO_SECRETO</w:delText></w:r></w:del></w:p></w:body></w:document>')
 
