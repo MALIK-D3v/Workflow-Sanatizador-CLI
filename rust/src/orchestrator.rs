@@ -1,24 +1,26 @@
-//! End-to-end Rust hybrid orchestrator: Rust validation -> RAM staging -> sandboxed worker ->
-//! independent Rust binary forensic gate -> atomic 0o600 delivery.
+//! End-to-end Rust hybrid orchestrator: zero-TOCTOU single-open ingestion -> RAM staging ->
+//! minimal-allowlist Bubblewrap sandbox -> single-open O_NOFOLLOW Rust forensic gate ->
+//! atomic 0o600 delivery.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::Value;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use crate::error::OrchestratorError;
-use crate::forensic::verify_staged_file;
+use crate::forensic::{verify_pdf_bytes, verify_png_bytes};
 use crate::ingestion::{
-    assert_no_symlink_in_path, compute_sha256, validate_document, DocumentType, IngestionLimits,
+    assert_no_symlink_in_path, ingest_to_staging, sha256_bytes, DocumentType, IngestionLimits,
 };
-use crate::ipc::{WorkerRequest, WorkerResponse, PROTOCOL_VERSION};
+use crate::ipc::{WorkerReport, WorkerRequest, WorkerResponse, PROTOCOL_VERSION};
 use crate::sandbox::{detect_sandbox_backend, run_in_sandbox, SandboxBackend, SandboxPolicy};
+
+const MAX_STAGED_OUTPUT_BYTES: u64 = 250 * 1024 * 1024; // 250 MiB cap
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorConfig {
@@ -35,6 +37,7 @@ pub struct OrchestratorConfig {
     pub allow_list: Vec<String>,
     pub limits: IngestionLimits,
     pub timeout: Duration,
+    pub allow_unshare_fallback: bool,
     pub allow_unsandboxed: bool,
     pub sandbox_override: Option<SandboxBackend>,
 }
@@ -55,6 +58,7 @@ impl Default for OrchestratorConfig {
             allow_list: Vec::new(),
             limits: IngestionLimits::default(),
             timeout: Duration::from_secs(120),
+            allow_unshare_fallback: false,
             allow_unsandboxed: false,
             sandbox_override: None,
         }
@@ -70,14 +74,16 @@ pub struct OrchestratorReport {
     pub sandbox_backend: String,
     pub rust_forensic_verified: bool,
     pub dry_run: bool,
-    pub worker_report: Value,
+    pub worker_report: Option<WorkerReport>,
 }
 
 fn create_ram_staging_dir() -> Result<TempDir, OrchestratorError> {
     let shm = Path::new("/dev/shm");
     if shm.is_dir() {
         if let Ok(dir) = tempfile::Builder::new().prefix("opsec_orch_").tempdir_in(shm) {
-            let _ = fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700));
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).map_err(|e| {
+                OrchestratorError::Io(format!("failed to restrict staging dir permissions: {e}"))
+            })?;
             return Ok(dir);
         }
     }
@@ -85,8 +91,21 @@ fn create_ram_staging_dir() -> Result<TempDir, OrchestratorError> {
         .prefix("opsec_orch_")
         .tempdir()
         .map_err(|e| OrchestratorError::Io(format!("unable to create staging dir: {e}")))?;
-    let _ = fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700));
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).map_err(|e| {
+        OrchestratorError::Io(format!("failed to restrict staging dir permissions: {e}"))
+    })?;
     Ok(dir)
+}
+
+fn random_hex_8() -> Result<String, OrchestratorError> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| OrchestratorError::Io(format!("CSPRNG failure: {e}")))?;
+    let mut out = String::with_capacity(16);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    Ok(out)
 }
 
 pub fn atomic_write_secure(target: &Path, bytes: &[u8]) -> Result<(), OrchestratorError> {
@@ -104,22 +123,18 @@ pub fn atomic_write_secure(target: &Path, bytes: &[u8]) -> Result<(), Orchestrat
         }
     }
 
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nonce = random_hex_8()?;
     let fname = target
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let tmp_path = target.with_file_name(format!(".{fname}.{pid}.{nanos}.tmp"));
+    let tmp_path = target.with_file_name(format!(".{fname}.{nonce}.tmp"));
 
     let mut opts = OpenOptions::new();
     opts.write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(libc_o_nofollow());
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
 
     let write_res: Result<(), OrchestratorError> = (|| {
         let mut file = opts.open(&tmp_path).map_err(|e| {
@@ -144,25 +159,31 @@ pub fn atomic_write_secure(target: &Path, bytes: &[u8]) -> Result<(), Orchestrat
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn libc_o_nofollow() -> i32 {
-    0o400000
-}
-
-#[cfg(not(target_os = "linux"))]
-fn libc_o_nofollow() -> i32 {
-    0
-}
-
 fn resolve_backend(cfg: &OrchestratorConfig) -> Result<SandboxBackend, OrchestratorError> {
     let backend = cfg.sandbox_override.unwrap_or_else(detect_sandbox_backend);
-    if backend == SandboxBackend::UnsafeDirect && !cfg.allow_unsandboxed {
-        return Err(OrchestratorError::SandboxError(
-            "no kernel sandbox (bwrap/unshare) available; refusing to run unsandboxed without --allow-unsandboxed"
-                .to_string(),
-        ));
+    match backend {
+        SandboxBackend::Bubblewrap => Ok(backend),
+        SandboxBackend::UnshareNet => {
+            if cfg.allow_unshare_fallback || cfg.allow_unsandboxed {
+                Ok(backend)
+            } else {
+                Err(OrchestratorError::SandboxError(
+                    "bubblewrap unavailable; refusing degraded unshare-net without --allow-unshare-fallback"
+                        .to_string(),
+                ))
+            }
+        }
+        SandboxBackend::UnsafeDirect => {
+            if cfg.allow_unsandboxed {
+                Ok(backend)
+            } else {
+                Err(OrchestratorError::SandboxError(
+                    "no kernel sandbox available; refusing unsandboxed run without --allow-unsandboxed"
+                        .to_string(),
+                ))
+            }
+        }
     }
-    Ok(backend)
 }
 
 fn validate_output_path(
@@ -206,25 +227,97 @@ fn stage_extension(doc_type: DocumentType, output_path: Option<&Path>) -> (&'sta
     }
 }
 
+/// Derive minimal read-only bind mounts needed for the Python venv/project ONLY (never /home).
+fn derive_worker_ro_binds(worker_bin: &Path) -> Vec<PathBuf> {
+    let mut binds = Vec::new();
+    let Ok(canon) = fs::canonicalize(worker_bin) else {
+        return binds;
+    };
+    // If worker lives in `<project>/.venv/bin/opsec-sanitize-worker`, bind ONLY `<project>` RO
+    if let Some(bin_dir) = canon.parent() {
+        if bin_dir.file_name().and_then(|s| s.to_str()) == Some("bin") {
+            if let Some(venv_dir) = bin_dir.parent() {
+                if venv_dir.file_name().and_then(|s| s.to_str()) == Some(".venv") {
+                    if let Some(project_dir) = venv_dir.parent() {
+                        binds.push(project_dir.to_path_buf());
+                        return binds;
+                    }
+                }
+                binds.push(venv_dir.to_path_buf());
+                return binds;
+            }
+        }
+        binds.push(canon);
+    }
+    binds
+}
+
+fn sanitize_worker_message(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control() || *c == ' ')
+        .take(512)
+        .collect()
+}
+
+/// Single-open O_NOFOLLOW bounded read of staged output verifying regular file & nlink == 1.
+fn read_staged_output_safely(staged_out: &Path) -> Result<Zeroizing<Vec<u8>>, OrchestratorError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(staged_out)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                OrchestratorError::ForensicLeak(
+                    "sandboxed worker replaced staged output with a symbolic link".to_string(),
+                )
+            } else {
+                OrchestratorError::WorkerError(format!("staged output missing or unreadable: {e}"))
+            }
+        })?;
+
+    let meta = file
+        .metadata()
+        .map_err(|e| OrchestratorError::Io(format!("unable to fstat staged output: {e}")))?;
+    if !meta.is_file() {
+        return Err(OrchestratorError::ForensicLeak(
+            "staged output is not a regular file".to_string(),
+        ));
+    }
+    if meta.nlink() != 1 {
+        return Err(OrchestratorError::ForensicLeak(
+            "staged output has unexpected hard-link count".to_string(),
+        ));
+    }
+    if meta.size() > MAX_STAGED_OUTPUT_BYTES {
+        return Err(OrchestratorError::ForensicLeak(
+            "staged output exceeds maximum safe byte cap".to_string(),
+        ));
+    }
+
+    let mut buf = Zeroizing::new(Vec::with_capacity(meta.size() as usize));
+    let mut bounded = file.take(MAX_STAGED_OUTPUT_BYTES + 1);
+    bounded
+        .read_to_end(&mut buf)
+        .map_err(|e| OrchestratorError::Io(format!("failed to read staged output: {e}")))?;
+    if (buf.len() as u64) > MAX_STAGED_OUTPUT_BYTES {
+        return Err(OrchestratorError::ForensicLeak(
+            "staged output exceeded byte cap during read".to_string(),
+        ));
+    }
+    Ok(buf)
+}
+
 pub fn orchestrate_sanitize(
     input_path: &Path,
     output_path: Option<&Path>,
     cfg: &OrchestratorConfig,
 ) -> Result<OrchestratorReport, OrchestratorError> {
-    let validated = validate_document(input_path, &cfg.limits)?;
-    validate_output_path(&validated.path, output_path, cfg.dry_run)?;
     let backend = resolve_backend(cfg)?;
-
     let staging = create_ram_staging_dir()?;
-    let input_ext = match validated.doc_type {
-        DocumentType::Pdf => "pdf",
-        DocumentType::Docx => "docx",
-        DocumentType::Image => "img",
-    };
-    let staged_in = staging.path().join(format!("input.{input_ext}"));
-    fs::copy(&validated.path, &staged_in)
-        .map_err(|e| OrchestratorError::Io(format!("failed to copy input to RAM staging: {e}")))?;
-    let _ = fs::set_permissions(&staged_in, fs::Permissions::from_mode(0o400));
+
+    // Zero-TOCTOU single-open input copy + validation into private RAM staging
+    let (validated, staged_in) = ingest_to_staging(input_path, staging.path(), &cfg.limits)?;
+    validate_output_path(&validated.path, output_path, cfg.dry_run)?;
 
     let (out_ext, is_png) = stage_extension(validated.doc_type, output_path);
     let staged_out = staging.path().join(format!("staged.{out_ext}"));
@@ -243,7 +336,7 @@ pub fn orchestrate_sanitize(
         ocr_scan_inputs: cfg.ocr_scan_inputs,
         paranoid_denoise: cfg.paranoid_denoise,
         dry_run: cfg.dry_run,
-        redact_filenames: true, // Worker never needs original host filename
+        redact_filenames: true,
         ner_mode: cfg.ner_mode.clone(),
         deny_list: cfg.deny_list.clone(),
         allow_list: cfg.allow_list.clone(),
@@ -256,6 +349,7 @@ pub fn orchestrate_sanitize(
     let policy = SandboxPolicy {
         backend,
         writable_dir: staging.path().to_path_buf(),
+        ro_extra_binds: derive_worker_ro_binds(&cfg.worker_bin),
         timeout: cfg.timeout,
     };
 
@@ -274,17 +368,20 @@ pub fn orchestrate_sanitize(
         )));
     }
     if !resp.ok {
-        let msg = resp
-            .message
-            .unwrap_or_else(|| "worker reported sanitization failure".to_string());
+        let msg = sanitize_worker_message(
+            resp.message
+                .as_deref()
+                .unwrap_or("worker reported sanitization failure"),
+        );
         if resp.error_code.as_deref() == Some("FORENSIC_LEAK") {
             return Err(OrchestratorError::ForensicLeak(msg));
         }
         return Err(OrchestratorError::WorkerError(msg));
     }
 
+    let hash_prefix = validated.sha256_hex.get(..12).unwrap_or("000000000000");
     let display_name = if cfg.redact_filenames {
-        format!("sha256:{}", &validated.sha256_hex[..12])
+        format!("sha256:{hash_prefix}")
     } else {
         input_path
             .file_name()
@@ -302,24 +399,18 @@ pub fn orchestrate_sanitize(
             sandbox_backend: backend.as_str().to_string(),
             rust_forensic_verified: false,
             dry_run: true,
-            worker_report: resp.report.unwrap_or(Value::Null),
+            worker_report: resp.report,
         });
     }
 
-    if !staged_out.is_file() {
-        return Err(OrchestratorError::WorkerError(
-            "worker succeeded without producing staged output file".to_string(),
-        ));
+    // Zero-TOCTOU single O_NOFOLLOW read -> Rust binary forensic gate -> hash -> atomic 0o600 write
+    let out_bytes = read_staged_output_safely(&staged_out)?;
+    if is_png {
+        verify_png_bytes(&out_bytes)?;
+    } else {
+        verify_pdf_bytes(&out_bytes, &cfg.deny_list)?;
     }
-
-    // Independent Rust binary forensic verification BEFORE atomic delivery!
-    verify_staged_file(&staged_out, is_png, &cfg.deny_list)?;
-
-    let out_bytes = Zeroizing::new(
-        fs::read(&staged_out)
-            .map_err(|e| OrchestratorError::Io(format!("unable to read verified output: {e}")))?,
-    );
-    let out_sha256 = compute_sha256(&staged_out)?;
+    let out_sha256 = sha256_bytes(&out_bytes);
     if let Some(final_dest) = output_path {
         atomic_write_secure(final_dest, &out_bytes)?;
     }
@@ -332,6 +423,6 @@ pub fn orchestrate_sanitize(
         sandbox_backend: backend.as_str().to_string(),
         rust_forensic_verified: true,
         dry_run: false,
-        worker_report: resp.report.unwrap_or(Value::Null),
+        worker_report: resp.report,
     })
 }

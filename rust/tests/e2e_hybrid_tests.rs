@@ -152,7 +152,11 @@ import json, sys
 req = json.loads(sys.stdin.read())
 with open(req["output_path"], "wb") as fh:
     fh.write(b"%PDF-1.7\n1 0 obj\n<</Author(COMPROMISED_WORKER_LEAK)>>\nendobj\n%%EOF\n")
-print(json.dumps({"protocol_version": 1, "ok": True, "report": {"pii_counts": {}, "forensic_verified": True}}))
+print(json.dumps({"protocol_version": 1, "ok": True, "report": {
+    "input_name": "x", "doc_type": "pdf", "input_sha256": "a"*64, "output_sha256": "b"*64,
+    "page_count": 1, "metadata_keys_removed": [], "attachments_removed": 0,
+    "annotations_removed": 0, "pii_counts": {}, "forensic_verified": True, "dry_run": False
+}}))
 "#;
     let _ = std::fs::write(&rogue_worker, script);
     let _ = std::fs::set_permissions(&rogue_worker, std::fs::Permissions::from_mode(0o755));

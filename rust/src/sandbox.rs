@@ -1,12 +1,20 @@
-//! Air-gapped Linux process sandbox (Bubblewrap / unshare) with scrubbed env and timeout.
+//! Hardened air-gapped Linux Bubblewrap sandbox with minimal read-only allowlist,
+//! zero host sockets (/run tmpfs), bounded pipe reads, and process-group timeout kill.
 
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::OrchestratorError;
+
+const MAX_STDOUT_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
+const MAX_STDERR_BYTES: u64 = 256 * 1024; // 256 KiB
+const TRUSTED_BWRAP_PATHS: [&str; 2] = ["/usr/bin/bwrap", "/bin/bwrap"];
+const TRUSTED_UNSHARE_PATHS: [&str; 2] = ["/usr/bin/unshare", "/bin/unshare"];
+const TRUSTED_TRUE_PATHS: [&str; 2] = ["/usr/bin/true", "/bin/true"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxBackend {
@@ -29,6 +37,7 @@ impl SandboxBackend {
 pub struct SandboxPolicy {
     pub backend: SandboxBackend,
     pub writable_dir: PathBuf,
+    pub ro_extra_binds: Vec<PathBuf>,
     pub timeout: Duration,
 }
 
@@ -39,33 +48,44 @@ pub struct SandboxOutput {
     pub stderr: String,
 }
 
-fn binary_exists(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+fn find_trusted_binary(candidates: &[&str]) -> Option<PathBuf> {
+    candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
 fn probe_bwrap(bwrap_bin: &Path) -> bool {
+    let Some(true_bin) = find_trusted_binary(&TRUSTED_TRUE_PATHS) else {
+        return false;
+    };
     Command::new(bwrap_bin)
         .args([
             "--ro-bind",
-            "/",
-            "/",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--ro-bind-try",
+            "/bin",
+            "/bin",
             "--dev",
             "/dev",
             "--proc",
             "/proc",
-            "--unshare-net",
-            "--unshare-pid",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/run",
+            "--unshare-all",
+            "--new-session",
+            "--cap-drop",
+            "ALL",
             "--die-with-parent",
             "--",
-            "/usr/bin/true",
         ])
+        .arg(true_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -75,8 +95,12 @@ fn probe_bwrap(bwrap_bin: &Path) -> bool {
 }
 
 fn probe_unshare(unshare_bin: &Path) -> bool {
+    let Some(true_bin) = find_trusted_binary(&TRUSTED_TRUE_PATHS) else {
+        return false;
+    };
     Command::new(unshare_bin)
-        .args(["-r", "-n", "/usr/bin/true"])
+        .args(["-r", "-n", "--"])
+        .arg(true_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -87,17 +111,132 @@ fn probe_unshare(unshare_bin: &Path) -> bool {
 
 /// Detect the strongest available kernel isolation backend on this Linux host.
 pub fn detect_sandbox_backend() -> SandboxBackend {
-    if let Some(bwrap) = binary_exists("bwrap") {
+    if let Some(bwrap) = find_trusted_binary(&TRUSTED_BWRAP_PATHS) {
         if probe_bwrap(&bwrap) {
             return SandboxBackend::Bubblewrap;
         }
     }
-    if let Some(unshare) = binary_exists("unshare") {
+    if let Some(unshare) = find_trusted_binary(&TRUSTED_UNSHARE_PATHS) {
         if probe_unshare(&unshare) {
             return SandboxBackend::UnshareNet;
         }
     }
     SandboxBackend::UnsafeDirect
+}
+
+fn build_bwrap_command(
+    program: &Path,
+    args: &[&str],
+    policy: &SandboxPolicy,
+) -> Result<Command, OrchestratorError> {
+    let bwrap = find_trusted_binary(&TRUSTED_BWRAP_PATHS).ok_or_else(|| {
+        OrchestratorError::SandboxError(
+            "trusted bubblewrap binary not found in /usr/bin or /bin".to_string(),
+        )
+    })?;
+    let wdir = policy.writable_dir.to_string_lossy().into_owned();
+
+    let mut cmd = Command::new(bwrap);
+    cmd.env_clear();
+    // Explicit minimal read-only allowlist — NEVER mount host `/`, `/home`, or `/run`!
+    cmd.args([
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind-try",
+        "/lib",
+        "/lib",
+        "--ro-bind-try",
+        "/lib64",
+        "/lib64",
+        "--ro-bind-try",
+        "/bin",
+        "/bin",
+        "--ro-bind-try",
+        "/sbin",
+        "/sbin",
+        "--ro-bind-try",
+        "/etc/ld.so.cache",
+        "/etc/ld.so.cache",
+        "--ro-bind-try",
+        "/etc/ld.so.conf",
+        "/etc/ld.so.conf",
+        "--ro-bind-try",
+        "/etc/ld.so.conf.d",
+        "/etc/ld.so.conf.d",
+        "--ro-bind-try",
+        "/etc/fonts",
+        "/etc/fonts",
+        "--ro-bind-try",
+        "/etc/alternatives",
+        "/etc/alternatives",
+        "--ro-bind-try",
+        "/etc/libreoffice",
+        "/etc/libreoffice",
+        "--ro-bind-try",
+        "/etc/ssl/certs",
+        "/etc/ssl/certs",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--tmpfs",
+        "/run",
+        "--bind",
+        &wdir,
+        &wdir,
+    ]);
+
+    for extra in &policy.ro_extra_binds {
+        if let Ok(canon) = std::fs::canonicalize(extra) {
+            let s = canon.to_string_lossy().into_owned();
+            cmd.args(["--ro-bind", &s, &s]);
+        }
+    }
+    if let Ok(prog_canon) = std::fs::canonicalize(program) {
+        let prog_str = prog_canon.to_string_lossy().into_owned();
+        if !prog_str.starts_with("/usr/") && !prog_str.starts_with("/bin/") {
+            cmd.args(["--ro-bind", &prog_str, &prog_str]);
+        }
+    }
+
+    cmd.args([
+        "--unshare-all",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
+        "--hostname",
+        "opsec-sandbox",
+        "--die-with-parent",
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/usr/bin:/bin",
+        "--setenv",
+        "HOME",
+        &wdir,
+        "--setenv",
+        "TMPDIR",
+        &wdir,
+        "--setenv",
+        "XDG_CONFIG_HOME",
+        &wdir,
+        "--setenv",
+        "XDG_CACHE_HOME",
+        &wdir,
+        "--setenv",
+        "LANG",
+        "C.UTF-8",
+        "--setenv",
+        "PYTHONNOUSERSITE",
+        "1",
+        "--",
+    ]);
+    cmd.arg(program);
+    cmd.args(args);
+    Ok(cmd)
 }
 
 fn build_sandboxed_command(
@@ -106,72 +245,15 @@ fn build_sandboxed_command(
     policy: &SandboxPolicy,
 ) -> Result<Command, OrchestratorError> {
     let wdir = policy.writable_dir.to_string_lossy().into_owned();
-    let path_env = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
-
-    match policy.backend {
-        SandboxBackend::Bubblewrap => {
-            let bwrap = binary_exists("bwrap").ok_or_else(|| {
-                OrchestratorError::SandboxError("bubblewrap ('bwrap') binary not found".to_string())
-            })?;
-            let mut cmd = Command::new(bwrap);
-            cmd.env_clear();
-            cmd.args([
-                "--ro-bind",
-                "/",
-                "/",
-                "--dev",
-                "/dev",
-                "--proc",
-                "/proc",
-                "--tmpfs",
-                "/tmp",
-                "--bind",
-                &wdir,
-                &wdir,
-            ]);
-            if let Ok(prog_canon) = std::fs::canonicalize(program) {
-                let prog_str = prog_canon.to_string_lossy().into_owned();
-                cmd.args(["--ro-bind", &prog_str, &prog_str]);
-            }
-            cmd.args([
-                "--unshare-net",
-                "--unshare-pid",
-                "--die-with-parent",
-                "--clearenv",
-                "--setenv",
-                "PATH",
-                &path_env,
-                "--setenv",
-                "HOME",
-                &wdir,
-                "--setenv",
-                "TMPDIR",
-                &wdir,
-                "--setenv",
-                "XDG_CONFIG_HOME",
-                &wdir,
-                "--setenv",
-                "XDG_CACHE_HOME",
-                &wdir,
-                "--setenv",
-                "LANG",
-                "C.UTF-8",
-                "--setenv",
-                "PYTHONNOUSERSITE",
-                "1",
-                "--",
-            ]);
-            cmd.arg(program);
-            cmd.args(args);
-            Ok(cmd)
-        }
+    let mut cmd = match policy.backend {
+        SandboxBackend::Bubblewrap => build_bwrap_command(program, args, policy)?,
         SandboxBackend::UnshareNet => {
-            let unshare = binary_exists("unshare").ok_or_else(|| {
-                OrchestratorError::SandboxError("'unshare' binary not found".to_string())
+            let unshare = find_trusted_binary(&TRUSTED_UNSHARE_PATHS).ok_or_else(|| {
+                OrchestratorError::SandboxError("trusted 'unshare' binary not found".to_string())
             })?;
-            let mut cmd = Command::new(unshare);
-            cmd.env_clear()
-                .env("PATH", &path_env)
+            let mut c = Command::new(unshare);
+            c.env_clear()
+                .env("PATH", "/usr/bin:/bin")
                 .env("HOME", &wdir)
                 .env("TMPDIR", &wdir)
                 .env("XDG_CONFIG_HOME", &wdir)
@@ -181,12 +263,12 @@ fn build_sandboxed_command(
                 .args(["-r", "-n", "--"])
                 .arg(program)
                 .args(args);
-            Ok(cmd)
+            c
         }
         SandboxBackend::UnsafeDirect => {
-            let mut cmd = Command::new(program);
-            cmd.env_clear()
-                .env("PATH", &path_env)
+            let mut c = Command::new(program);
+            c.env_clear()
+                .env("PATH", "/usr/bin:/bin")
                 .env("HOME", &wdir)
                 .env("TMPDIR", &wdir)
                 .env("XDG_CONFIG_HOME", &wdir)
@@ -194,12 +276,31 @@ fn build_sandboxed_command(
                 .env("LANG", "C.UTF-8")
                 .env("PYTHONNOUSERSITE", "1")
                 .args(args);
-            Ok(cmd)
+            c
         }
-    }
+    };
+    // Place child in its own process group so timeout kills every descendant process cleanly.
+    cmd.process_group(0);
+    Ok(cmd)
 }
 
-/// Spawn `program` inside the configured sandbox, pipe `stdin_data`, and enforce timeout.
+fn kill_process_group(child: &mut std::process::Child) {
+    let pid = child.id() as libc::pid_t;
+    if pid > 0 {
+        // Safe: sends SIGKILL to the child's dedicated process group created via process_group(0).
+        let _ = std::process::Command::new("/usr/bin/kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Spawn `program` inside the configured sandbox, pipe `stdin_data` asynchronously,
+/// bound stdout/stderr reads, and enforce strict timeout with process-group termination.
 pub fn run_in_sandbox(
     program: &Path,
     args: &[&str],
@@ -215,24 +316,29 @@ pub fn run_in_sandbox(
         .spawn()
         .map_err(|e| OrchestratorError::SandboxError(format!("failed to spawn sandbox: {e}")))?;
 
-    if let Some(mut child_in) = child.stdin.take() {
-        let _ = child_in.write_all(stdin_data);
-    }
+    let stdin_payload = stdin_data.to_vec();
+    let stdin_pipe = child.stdin.take();
+    let in_handle = thread::spawn(move || {
+        if let Some(mut w) = stdin_pipe {
+            let _ = w.write_all(&stdin_payload);
+            let _ = w.flush();
+        }
+    });
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
     let out_handle = thread::spawn(move || -> Vec<u8> {
         let mut buf = Vec::new();
-        if let Some(mut r) = stdout_pipe {
-            let _ = r.read_to_end(&mut buf);
+        if let Some(r) = stdout_pipe {
+            let _ = r.take(MAX_STDOUT_BYTES).read_to_end(&mut buf);
         }
         buf
     });
     let err_handle = thread::spawn(move || -> Vec<u8> {
         let mut buf = Vec::new();
-        if let Some(mut r) = stderr_pipe {
-            let _ = r.read_to_end(&mut buf);
+        if let Some(r) = stderr_pipe {
+            let _ = r.take(MAX_STDERR_BYTES).read_to_end(&mut buf);
         }
         buf
     });
@@ -243,8 +349,8 @@ pub fn run_in_sandbox(
             Ok(Some(st)) => break st,
             Ok(None) => {
                 if start.elapsed() >= policy.timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_group(&mut child);
+                    let _ = in_handle.join();
                     let _ = out_handle.join();
                     let _ = err_handle.join();
                     return Err(OrchestratorError::SandboxError(
@@ -254,7 +360,7 @@ pub fn run_in_sandbox(
                 thread::sleep(Duration::from_millis(15));
             }
             Err(e) => {
-                let _ = child.kill();
+                kill_process_group(&mut child);
                 return Err(OrchestratorError::SandboxError(format!(
                     "error waiting for sandboxed worker: {e}"
                 )));
@@ -262,6 +368,7 @@ pub fn run_in_sandbox(
         }
     };
 
+    let _ = in_handle.join();
     let stdout_bytes = out_handle.join().unwrap_or_default();
     let stderr_bytes = err_handle.join().unwrap_or_default();
 

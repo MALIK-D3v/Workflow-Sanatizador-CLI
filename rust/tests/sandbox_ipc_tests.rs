@@ -49,6 +49,7 @@ fn bubblewrap_sandbox_blocks_network_and_host_writes_outside_staging() {
     let policy = SandboxPolicy {
         backend: SandboxBackend::Bubblewrap,
         writable_dir: staging_path.to_path_buf(),
+        ro_extra_binds: Vec::new(),
         timeout: Duration::from_secs(10),
     };
 
@@ -93,6 +94,7 @@ fn sandbox_enforces_execution_timeout() {
     let policy = SandboxPolicy {
         backend: detect_sandbox_backend(),
         writable_dir: staging_path.to_path_buf(),
+        ro_extra_binds: Vec::new(),
         timeout: Duration::from_millis(400),
     };
 

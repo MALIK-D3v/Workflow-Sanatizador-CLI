@@ -15,27 +15,21 @@ startxref\n0\n%%EOF\n"
 fn build_minimal_png(extra_chunk: Option<(&[u8; 4], &[u8])>, trailing: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-    // IHDR (13 bytes dummy)
-    let ihdr_data = [0u8; 13];
-    out.extend_from_slice(&(ihdr_data.len() as u32).to_be_bytes());
-    out.extend_from_slice(b"IHDR");
-    out.extend_from_slice(&ihdr_data);
-    out.extend_from_slice(&[0u8; 4]);
+    let push_chunk = |buf: &mut Vec<u8>, ctype: &[u8; 4], data: &[u8]| {
+        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        buf.extend_from_slice(ctype);
+        buf.extend_from_slice(data);
+        let mut crc_in = Vec::with_capacity(4 + data.len());
+        crc_in.extend_from_slice(ctype);
+        crc_in.extend_from_slice(data);
+        buf.extend_from_slice(&crc32fast::hash(&crc_in).to_be_bytes());
+    };
+    push_chunk(&mut out, b"IHDR", &[0u8; 13]);
     if let Some((ctype, data)) = extra_chunk {
-        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        out.extend_from_slice(ctype);
-        out.extend_from_slice(data);
-        out.extend_from_slice(&[0u8; 4]);
+        push_chunk(&mut out, ctype, data);
     }
-    // IDAT
-    out.extend_from_slice(&4u32.to_be_bytes());
-    out.extend_from_slice(b"IDAT");
-    out.extend_from_slice(&[1, 2, 3, 4]);
-    out.extend_from_slice(&[0u8; 4]);
-    // IEND
-    out.extend_from_slice(&0u32.to_be_bytes());
-    out.extend_from_slice(b"IEND");
-    out.extend_from_slice(&[0u8; 4]);
+    push_chunk(&mut out, b"IDAT", &[1, 2, 3, 4]);
+    push_chunk(&mut out, b"IEND", &[]);
     out.extend_from_slice(trailing);
     out
 }

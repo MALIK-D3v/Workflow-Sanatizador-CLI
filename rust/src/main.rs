@@ -2,7 +2,9 @@
 #![deny(warnings)]
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -16,11 +18,13 @@ use opsec_orchestrator::orchestrator::{
     atomic_write_secure, orchestrate_sanitize, OrchestratorConfig, OrchestratorReport,
 };
 
+const MAX_TERM_FILE_BYTES: u64 = 1_048_576;
+
 #[derive(Parser)]
 #[command(
     name = "opsec-orchestrator",
     version,
-    about = "Option C Hybrid OPSEC Sanitizer: Rust ingestion + Bubblewrap air-gapped Python worker + Rust binary forensic verifier"
+    about = "Option C Hybrid OPSEC Sanitizer: Rust ingestion + minimal-allowlist Bubblewrap air-gapped Python worker + Rust binary forensic verifier"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -80,7 +84,7 @@ struct CommonOpts {
     /// Sensitive term that must always be redacted (repeatable).
     #[arg(long)]
     deny_list: Vec<String>,
-    /// Newline-separated file of sensitive terms to redact.
+    /// Newline-separated file of sensitive terms to redact (preferred over --deny-list).
     #[arg(long)]
     deny_list_file: Option<PathBuf>,
     /// Non-sensitive term excluded from redaction (repeatable).
@@ -95,7 +99,10 @@ struct CommonOpts {
     /// Worker execution timeout in seconds.
     #[arg(long, default_value_t = 120)]
     timeout_secs: u64,
-    /// Explicitly permit running without kernel sandbox if bwrap/unshare are unavailable.
+    /// Explicitly allow degraded unshare-net fallback if Bubblewrap is unavailable.
+    #[arg(long)]
+    allow_unshare_fallback: bool,
+    /// Explicitly permit running without kernel sandbox if neither bwrap nor unshare exist.
     #[arg(long)]
     allow_unsandboxed: bool,
 }
@@ -120,9 +127,19 @@ fn load_terms(inline: &[String], file: Option<&Path>) -> Result<Vec<String>, Orc
         .collect();
     if let Some(path) = file {
         assert_no_symlink_in_path(path, false)?;
-        let content = fs::read_to_string(path).map_err(|e| {
-            OrchestratorError::InvalidInput(format!("unable to read term list file: {e}"))
-        })?;
+        let f = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|e| {
+                OrchestratorError::InvalidInput(format!("unable to open term list file: {e}"))
+            })?;
+        let mut content = String::new();
+        f.take(MAX_TERM_FILE_BYTES)
+            .read_to_string(&mut content)
+            .map_err(|e| {
+                OrchestratorError::InvalidInput(format!("unable to read term list file: {e}"))
+            })?;
         for line in content.lines() {
             let trimmed = line.trim();
             if !trimmed.is_empty() && !trimmed.starts_with('#') {
@@ -137,8 +154,9 @@ fn resolve_default_worker_bin(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(bin) = explicit {
         return bin;
     }
+    // Check only immediate project layout (<root>/rust/target/<profile>/opsec-orchestrator -> <root>/.venv/bin/opsec-sanitize-worker)
     if let Ok(exe) = std::env::current_exe() {
-        for ancestor in exe.ancestors().skip(1) {
+        for ancestor in exe.ancestors().skip(1).take(4) {
             let candidate = ancestor.join(".venv/bin/opsec-sanitize-worker");
             if candidate.is_file() {
                 return candidate;
@@ -166,6 +184,7 @@ fn build_config(opts: &CommonOpts) -> Result<OrchestratorConfig, OrchestratorErr
         deny_list: load_terms(&opts.deny_list, opts.deny_list_file.as_deref())?,
         allow_list: load_terms(&opts.allow_list, opts.allow_list_file.as_deref())?,
         timeout: Duration::from_secs(opts.timeout_secs.max(1)),
+        allow_unshare_fallback: opts.allow_unshare_fallback,
         allow_unsandboxed: opts.allow_unsandboxed,
         ..OrchestratorConfig::default()
     })
