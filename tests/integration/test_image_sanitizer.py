@@ -87,6 +87,8 @@ class TestImageSanitizer:
         clean, _ = strip_image_to_clean_rgb(src, paranoid_denoise=True)
 
         # All channels equal (grayscale converted to RGB) and pure yellow tint neutralized
-        r, g, b = clean.getpixel((30, 30))  # type: ignore[misc]
+        pixel = clean.getpixel((30, 30))
+        assert isinstance(pixel, tuple) and len(pixel) == 3
+        r, g, b = pixel
         assert r == g == b
         assert clean.info == {}
