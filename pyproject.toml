@@ -28,6 +28,7 @@ dev = [
 
 [project.scripts]
 opsec-sanitize = "opsec_sanitizer.cli:app"
+opsec-sanitize-worker = "opsec_sanitizer.worker:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
