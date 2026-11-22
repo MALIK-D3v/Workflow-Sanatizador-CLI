@@ -1,0 +1,10 @@
+.git/
+.venv/
+rust/target/
+demo/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+__pycache__/
+*.py[cod]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -30,8 +31,9 @@ class TestAirgappedRunnerScript:
         assert _RUNNER_SCRIPT.is_file(), "scripts/run-airgapped.sh is missing"
         body = _RUNNER_SCRIPT.read_text(encoding="utf-8")
         assert "eval " not in body
-        proc = subprocess.run(
-            ["bash", "-n", str(_RUNNER_SCRIPT)],
+        bash_bin = shutil.which("bash") or "/usr/bin/bash"
+        proc = subprocess.run(  # noqa: S603
+            [bash_bin, "-n", str(_RUNNER_SCRIPT)],
             check=False,
             capture_output=True,
             text=True,
@@ -45,7 +47,7 @@ class TestAirgappedRunnerScript:
         deny = tmp_path / "deny.txt"
         deny.write_text("AliasHalcon\n", encoding="utf-8")
 
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603
             [
                 str(_RUNNER_SCRIPT),
                 "--dry-run-cmd",
@@ -85,7 +87,7 @@ class TestAirgappedRunnerScript:
         link.symlink_to(real)
         out = tmp_path / "clean.pdf"
 
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603
             [str(_RUNNER_SCRIPT), "--dry-run-cmd", "--engine", "podman", str(link), str(out)],
             check=False,
             capture_output=True,
@@ -103,7 +105,7 @@ class TestAirgappedRunnerScript:
         src.write_bytes(b"%PDF-1.7\n%%EOF\n")
         out = tmp_path / "out.pdf"
 
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603
             [str(_RUNNER_SCRIPT), "--dry-run-cmd", "--engine", bad_engine, str(src), str(out)],
             check=False,
             capture_output=True,
