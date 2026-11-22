@@ -20,6 +20,10 @@ class PiiCategory(StrEnum):
 
     CURP = "CURP"
     RFC = "RFC"
+    CLABE = "CLABE"
+    NSS = "NSS"
+    INE = "INE"
+    IP_ADDRESS = "IP_ADDRESS"
     EMAIL = "EMAIL"
     PHONE = "PHONE"
     PERSON = "PERSON"

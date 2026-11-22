@@ -1,8 +1,9 @@
-"""Deterministic Mexican PII detectors (CURP, RFC, email, phone)."""
+"""Deterministic Mexican PII & network detectors (CURP, RFC, CLABE, NSS, INE, IP, email, phone)."""
 
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import re
 
 from opsec_sanitizer.domain.models import PiiCategory, PiiSpan
@@ -15,18 +16,37 @@ _CURP_STATES = frozenset(
         "QR", "SP", "SL", "SR", "TC", "TS", "TL", "VZ", "YN", "ZS", "NE",
     }
 )
+_INE_STATES = frozenset({f"{i:02d}" for i in range(1, 33)} | {"87"})
+_CLABE_WEIGHTS = (3, 7, 1)
 
 _CURP_PATTERN = re.compile(
     r"\b([A-Z][AEIOUX][A-Z]{2}\d{6}[HMX][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[0-9A-Z]\d)\b",
     re.IGNORECASE,
 )
+_INE_CLAVE_PATTERN = re.compile(
+    r"\b([B-DF-HJ-NP-TV-Z]{6}\d{6}(?:0[1-9]|[12]\d|3[0-2]|87)[HM]\d{3})\b",
+    re.IGNORECASE,
+)
+_INE_IDMEX_PATTERN = re.compile(r"\b(IDMEX\d{10,13})\b", re.IGNORECASE)
 _RFC_PATTERN = re.compile(
     r"(?<![A-Z0-9Ñ&])([A-ZÑ&]{3,4}-?\d{6}-?[A-Z0-9]{2}[0-9A])(?![A-Z0-9Ñ&])",
+    re.IGNORECASE,
+)
+_CLABE_PATTERN = re.compile(r"(?<!\d)(\d{18})(?!\d)")
+_NSS_HYPHEN_PATTERN = re.compile(r"(?<!\d)(\d{2}-\d{2}-\d{2}-\d{4}-\d)(?!\d)")
+_NSS_LABELED_PATTERN = re.compile(
+    r"\b(?:NSS|IMSS|Seguro\s+Social|Seguridad\s+Social)\s*(?::|No\.?|#)?\s*(\d{11})(?!\d)",
     re.IGNORECASE,
 )
 _EMAIL_PATTERN = re.compile(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 )
+_IPV4_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._])"
+    r"((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})"
+    r"(?![.\d])"
+)
+_IPV6_CANDIDATE_PATTERN = re.compile(r"(?<![A-Za-z0-9:])([0-9A-Fa-f:]{4,39})(?![A-Za-z0-9:])")
 _PHONE_PATTERN = re.compile(
     r"(?<!\d)(?:"
     r"\+52[\s.-]?(?:1[\s.-]?)?\d{10}"
@@ -85,8 +105,68 @@ def is_valid_rfc(candidate: str) -> bool:
     return _is_valid_yymmdd(compact[date_offset : date_offset + 6])
 
 
+def compute_clabe_check_digit(clabe_prefix_17: str) -> str:
+    """Compute Banxico CLABE check digit (position 18) for a 17-digit prefix."""
+    if len(clabe_prefix_17) != 17 or not clabe_prefix_17.isdigit():
+        raise ValueError("CLABE prefix must be exactly 17 digits")
+    total = 0
+    for idx, ch in enumerate(clabe_prefix_17):
+        weight = _CLABE_WEIGHTS[idx % 3]
+        total += (int(ch) * weight) % 10
+    return str((10 - (total % 10)) % 10)
+
+
+def is_valid_clabe(candidate: str) -> bool:
+    """Return True if candidate is a valid 18-digit Mexican CLABE with Banxico check digit."""
+    if len(candidate) != 18 or not candidate.isdigit():
+        return False
+    return compute_clabe_check_digit(candidate[:17]) == candidate[17]
+
+
+def compute_nss_check_digit(nss_prefix_10: str) -> str:
+    """Compute IMSS modified-Luhn check digit (position 11) for a 10-digit NSS prefix."""
+    if len(nss_prefix_10) != 10 or not nss_prefix_10.isdigit():
+        raise ValueError("NSS prefix must be exactly 10 digits")
+    total = 0
+    for idx, ch in enumerate(nss_prefix_10):
+        weight = 1 if idx % 2 == 0 else 2
+        prod = int(ch) * weight
+        total += (prod // 10) + (prod % 10)
+    return str((10 - (total % 10)) % 10)
+
+
+def is_valid_nss(candidate: str) -> bool:
+    """Return True if candidate is a valid 11-digit IMSS NSS (optional hyphens)."""
+    compact = candidate.replace("-", "")
+    if len(compact) != 11 or not compact.isdigit():
+        return False
+    if compact[:2] == "00":
+        return False
+    return compute_nss_check_digit(compact[:10]) == compact[10]
+
+
+def is_valid_ine_clave(candidate: str) -> bool:
+    """Return True if candidate matches Mexican INE Clave de Elector (18 chars)."""
+    upper = candidate.upper()
+    if len(upper) != 18 or not _INE_CLAVE_PATTERN.fullmatch(upper):
+        return False
+    if not _is_valid_yymmdd(upper[6:12]):
+        return False
+    return upper[12:14] in _INE_STATES
+
+
+def _is_valid_ipv6(candidate: str) -> bool:
+    if candidate.count(":") < 2:
+        return False
+    try:
+        ipaddress.IPv6Address(candidate)
+    except ValueError:
+        return False
+    return True
+
+
 def detect_regex_pii(text: str) -> tuple[PiiSpan, ...]:
-    """Detect CURP, RFC, email, and Mexican phone spans in text without mutating it."""
+    """Detect CURP, RFC, CLABE, NSS, INE, IP, email, and Mexican phone spans in text."""
     if not text:
         return ()
 
@@ -96,30 +176,52 @@ def detect_regex_pii(text: str) -> tuple[PiiSpan, ...]:
     def _overlaps(start: int, end: int) -> bool:
         return any(not (end <= s or start >= e) for s, e in occupied)
 
-    for match in _CURP_PATTERN.finditer(text):
-        if is_valid_curp(match.group(1)):
-            s, e = match.span(1)
-            spans.append(PiiSpan(start=s, end=e, category=PiiCategory.CURP, confidence=1.0))
-            occupied.append((s, e))
+    def _add(start: int, end: int, category: PiiCategory, confidence: float) -> None:
+        if not _overlaps(start, end):
+            spans.append(PiiSpan(start=start, end=end, category=category, confidence=confidence))
+            occupied.append((start, end))
 
-    for match in _RFC_PATTERN.finditer(text):
-        s, e = match.span(1)
-        if not _overlaps(s, e) and is_valid_rfc(match.group(1)):
-            spans.append(PiiSpan(start=s, end=e, category=PiiCategory.RFC, confidence=0.98))
-            occupied.append((s, e))
+    for m in _CURP_PATTERN.finditer(text):
+        if is_valid_curp(m.group(1)):
+            _add(*m.span(1), PiiCategory.CURP, 1.0)
 
-    for match in _EMAIL_PATTERN.finditer(text):
-        s, e = match.span()
-        if not _overlaps(s, e):
-            spans.append(PiiSpan(start=s, end=e, category=PiiCategory.EMAIL, confidence=0.99))
-            occupied.append((s, e))
+    for m in _INE_CLAVE_PATTERN.finditer(text):
+        if is_valid_ine_clave(m.group(1)):
+            _add(*m.span(1), PiiCategory.INE, 0.98)
 
-    for match in _PHONE_PATTERN.finditer(text):
-        s, e = match.span()
-        digits = "".join(ch for ch in match.group() if ch.isdigit())
-        if len(digits) in (10, 12, 13) and not _overlaps(s, e):
-            spans.append(PiiSpan(start=s, end=e, category=PiiCategory.PHONE, confidence=0.9))
-            occupied.append((s, e))
+    for m in _INE_IDMEX_PATTERN.finditer(text):
+        _add(*m.span(1), PiiCategory.INE, 0.99)
+
+    for m in _RFC_PATTERN.finditer(text):
+        if is_valid_rfc(m.group(1)):
+            _add(*m.span(1), PiiCategory.RFC, 0.98)
+
+    for m in _CLABE_PATTERN.finditer(text):
+        if is_valid_clabe(m.group(1)):
+            _add(*m.span(1), PiiCategory.CLABE, 0.99)
+
+    for m in _NSS_HYPHEN_PATTERN.finditer(text):
+        if is_valid_nss(m.group(1)):
+            _add(*m.span(1), PiiCategory.NSS, 0.98)
+
+    for m in _NSS_LABELED_PATTERN.finditer(text):
+        if is_valid_nss(m.group(1)):
+            _add(*m.span(1), PiiCategory.NSS, 0.97)
+
+    for m in _EMAIL_PATTERN.finditer(text):
+        _add(*m.span(), PiiCategory.EMAIL, 0.99)
+
+    for m in _IPV4_PATTERN.finditer(text):
+        _add(*m.span(1), PiiCategory.IP_ADDRESS, 0.95)
+
+    for m in _IPV6_CANDIDATE_PATTERN.finditer(text):
+        if _is_valid_ipv6(m.group(1)):
+            _add(*m.span(1), PiiCategory.IP_ADDRESS, 0.96)
+
+    for m in _PHONE_PATTERN.finditer(text):
+        digits = "".join(ch for ch in m.group() if ch.isdigit())
+        if len(digits) in (10, 12, 13):
+            _add(*m.span(), PiiCategory.PHONE, 0.9)
 
     spans.sort(key=lambda sp: (sp.start, sp.end))
     return tuple(spans)
