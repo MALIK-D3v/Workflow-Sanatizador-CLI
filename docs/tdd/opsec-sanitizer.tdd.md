@@ -38,6 +38,8 @@
 | **C3. Sandbox Bubblewrap + IPC** | Pruebas reales de bloqueo de red, FS solo-lectura y timeout | `416b95f` | `a1554c7` (`3 passed`) | `cargo test --test sandbox_ipc_tests` |
 | **C4. Orquestador E2E + CLI Rust** | Flujo completo Rust → Bubblewrap → Python → Verificador Rust → `0o600` (PDF/JPG/DOCX + worker comprometido) | `47bb39c` | `bde460f` (`10 passed`) | `cargo test` |
 | **C5. Hardening Opción C** | Allowlist RO mínima (oculta `/run` y `$HOME`), zero-TOCTOU `O_NOFOLLOW`, PDF desync/`/ObjStm`/FlateDecode, PNG CRC-32/`IEND==0`, OS FD 1 aislado | `74de3c3` | `91255e8` (`14 Rust + 71 Python passed`) | `cargo test && .venv/bin/pytest --cov=src/opsec_sanitizer` |
+| **D1. PII Extendido (MX/Red)** | Detectores con dígito verificador para **CLABE** (Banxico), **NSS** (Luhn IMSS), **INE** (Clave de Elector + `IDMEX`) e **IPv4/IPv6** | `78b271d` | `b9d5d92` (`24 passed`) | `.venv/bin/pytest tests/unit/test_regex_mx*.py` |
+| **D2. Contenedor Air-Gapped** | `Containerfile` multi-stage no-root + `scripts/run-airgapped.sh` (`--network=none`, `--read-only`, `--cap-drop=ALL`, rechazo de symlinks) | `b649f38` | `15eaaac` (`7 passed`) | `.venv/bin/pytest tests/unit/test_container_packaging.py` |
 
 ## 4. Test Specification Matrix (Resumen Consolidado)
 
@@ -51,8 +53,9 @@
 | 6 | Flujo completo CLI Python y Orquestador Rust release (`0o600`, reportes sin PII, `dry-run`, `batch`) | `tests/e2e/test_cli_e2e.py`, `rust/tests/e2e_hybrid_tests.rs` | e2e | PASS |
 
 ## 5. Coverage, Lint, Typecheck & Known Gaps
-- **Python**: `71 passed` (`0 failed`, `0 skipped`), **83.68%** cobertura líneas+ramas (`>= 80%`), `ruff check src tests` (0 errores), `mypy src tests --strict` (0 errores en 33 archivos).
+- **Python**: `86 passed` (`0 failed`, `0 skipped`), **84.06%** cobertura líneas+ramas (`>= 80%`), `ruff check src tests` (0 errores), `mypy src tests --strict` (0 errores en 35 archivos).
 - **Rust**: `14 passed` (`0 failed`, `0 skipped`), compilación `debug` y `release` con `#![deny(warnings)]`, `unwrap_used = "deny"`, `expect_used = "deny"` y `0` bloques `unsafe`.
+- **Total**: **100 pruebas automatizadas en verde**.
 - **Known Gaps**:
   - `TesseractOcrEngine` y `SpacyNerEngine` son adaptadores opcionales (el host usa `RapidOcrEngine` ONNX incluido y `HeuristicSpanishNerEngine` 100% offline).
   - `cargo-clippy` no está instalado en este sistema Fedora, por lo que los lints del compilador se aplican con `#![deny(warnings)]` en todos los crates/binarios.

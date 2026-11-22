@@ -1,6 +1,6 @@
 # OPSEC Document Sanitizer — Arquitectura Híbrida Air-Gapped (Opción C)
 
-Herramienta CLI **100% offline, aislada con Bubblewrap y *fail-closed*** para redacciones de periodismo de investigación. Combina un **orquestador y verificador forense binario en Rust** (`opsec-orchestrator`) con un **worker Python aislado sin red** (`opsec-sanitize-worker`) para eliminar metadatos ocultos, redactar PII mexicano (CURP, RFC, correos, teléfonos y nombres propios) y aplicar *flattening* irreversible con OCR limpio.
+Herramienta CLI **100% offline, aislada con Bubblewrap (o contenedor `--network=none`) y *fail-closed*** para redacciones de periodismo de investigación. Combina un **orquestador y verificador forense binario en Rust** (`opsec-orchestrator`) con un **worker Python aislado sin red** (`opsec-sanitize-worker`) para eliminar metadatos ocultos, redactar PII mexicano (**CURP**, **RFC**, **CLABE**, **NSS/IMSS**, **INE Clave de Elector / IDMEX**, **IPv4/IPv6**, correos, teléfonos y nombres propios) y aplicar *flattening* irreversible con OCR limpio.
 
 ## Arquitectura Híbrida (Defensa en Profundidad)
 
@@ -67,14 +67,25 @@ cargo build --release --manifest-path rust/Cargo.toml
   --report-json lote.json
 ```
 
-> También sigue disponible el CLI directo de Python (`.venv/bin/opsec-sanitize`), aunque para documentos de origen hostil en redacciones se recomienda siempre usar `opsec-orchestrator` con aislamiento Bubblewrap.
+> También sigue disponible el CLI directo de Python (`.venv/bin/opsec-sanitize`), aunque para documentos de origen hostil en redacciones se recomienda siempre usar `opsec-orchestrator` con aislamiento Bubblewrap o el contenedor air-gapped.
+
+## Ejecución en Contenedor Air-Gapped (Podman / Docker)
+
+```bash
+# Construir imagen multi-stage con modelos ONNX embebidos (100% offline en runtime)
+podman build -f Containerfile -t opsec-sanitizer:airgapped .
+
+# Ejecutar con --network=none --read-only --cap-drop=ALL --tmpfs /dev/shm
+./scripts/run-airgapped.sh --deny-list-file terminos.txt --redact-filenames \
+  filtracion.pdf limpio.pdf
+```
 
 ### Códigos de salida
 - `0`: Sanitización completada y aprobada por ambos verificadores forenses (Python + Rust independiente).
 - `1`: Error de validación, formato no soportado, sandbox no disponible o fallo en lote.
 - `2`: Aborto *fail-closed* por detección de fuga residual (`ForensicLeak`).
 
-## Verificación de pruebas (85 pruebas totales)
+## Verificación de pruebas (100 pruebas totales)
 
 ```bash
 # Suite Rust (ingesta, verificador binario, aislamiento Bubblewrap y E2E híbrido)
